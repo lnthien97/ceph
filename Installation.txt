@@ -1,0 +1,402 @@
+### Specs
+3 MON nodes
+    2 CPUs
+    4 GB RAM
+    1 x 16 GB disk (OS)
+3 OSD nodes 
+    2 CPUs
+    4 GB RAM
+    3 x 16 GB disk (1 disk for OS, 2 disks for data)
+###
+OS : Ubuntu 22.04 LTS
+
+
+
+-------------------
+#############################################################
+###  Setup user cephadmin (non-password, sudo permission) ###
+#############################################################
+
+useradd -m cephadmin -d /home/cephadmin
+passwd -d cephadmin
+usermod -aG sudo cephadmin
+mkdir /home/cephadmin/.ssh
+chown -R cephadmin:cephadmin /home/cephadmin/.ssh
+
+
+## create non-password key pair for cephadmin user 
+ssh-keygen -t rsa
+
+## Copy id_rsa to first MON server at path /home/cephadmin/.ssh/id_rsa
+## Copy id_rsa.pub_key to all server at patb /home/cephadmin.ssh/authorized_keys
+
+-------------------
+
+###################
+### Setup common ##
+###################
+
+## Install chrony
+
+apt update
+apt install chrony
+
+/etc/chrony/chrony.conf
+
+    pool 10.237.7.250 iburst
+    confdir /etc/chrony/conf.d
+    sourcedir /run/chrony-dhcp
+    sourcedir /etc/chrony/sources.d
+    keyfile /etc/chrony/chrony.keys
+    driftfile /var/lib/chrony/chrony.drift
+    ntsdumpdir /var/lib/chrony
+    logdir /var/log/chrony
+    maxupdateskew 100.0
+    rtcsync
+    makestep 1 3
+    leapsectz right/UTC
+
+systemctl restart chrony 
+
+chronyc sources
+MS Name/IP address         Stratum Poll Reach LastRx Last sample
+===============================================================================
+^* 10.237.7.250                  3   6    17    25    -17us[  -88us] +/-  150ms
+
+------------------
+###################
+## Setup Podman ###
+###################
+
+apt update 
+apt install libuser 
+
+useradd -M ceph 
+usermod -L ceph
+mkdir /var/lib/ceph 
+chown -R ceph:ceph /var/lib/ceph 
+
+apt install podman 
+
+
+
+# Setup podman registries in 10.237.7.170
+mkdir -p /var/lib/registry
+podman run --privileged -d \
+  --name registry \
+  -p 5000:5000 \
+  -v /var/lib/registry:/var/lib/registry \
+  --restart=always \
+  registry:2
+
+
+podman pull quay.io/ceph/ceph:v17.2.6
+podman pull quay.io/prometheus/prometheus:v2.33.4
+podman pull docker.io/grafana/loki:2.4.0
+podman pull docker.io/grafana/promtail:2.4.0
+podman pull quay.io/prometheus/node-exporter:v1.3.1
+podman pull quay.io/prometheus/alertmanager:v0.23.0
+podman pull quay.io/ceph/ceph-grafana:8.3.5
+podman pull quay.io/ceph/haproxy:2.3
+podman pull quay.io/ceph/keepalived:2.1.5
+podman pull docker.io/maxwo/snmp-notifier:v1.2.1
+
+
+podman tag quay.io/ceph/ceph:v17.2.6                10.237.7.170:5000/ceph/ceph:v17.2.6
+podman tag quay.io/prometheus/prometheus:v2.33.4    10.237.7.170:5000/prometheus/prometheus:v2.33.4
+podman tag docker.io/grafana/loki:2.4.0             10.237.7.170:5000/grafana/loki:2.4.0
+podman tag docker.io/grafana/promtail:2.4.0         10.237.7.170:5000/grafana/promtail:2.4.0
+podman tag quay.io/prometheus/node-exporter:v1.3.1  10.237.7.170:5000/prometheus/node-exporter:v1.3.1
+podman tag quay.io/prometheus/alertmanager:v0.23.0  10.237.7.170:5000/prometheus/alertmanager:v0.23.0
+podman tag quay.io/ceph/ceph-grafana:8.3.5          10.237.7.170:5000/ceph/ceph-grafana:8.3.5
+podman tag quay.io/ceph/haproxy:2.3                 10.237.7.170:5000/ceph/haproxy:2.3
+podman tag quay.io/ceph/keepalived:2.1.5            10.237.7.170:5000/ceph/keepalived:2.1.5
+podman tag docker.io/maxwo/snmp-notifier:v1.2.1     10.237.7.170:5000/maxwo/snmp-notifier:v1.2.1
+
+
+/etc/containers/registries.conf
+    unqualified-search-registries = []
+
+    [[registry]]
+    location="10.237.7.170"
+    insecure=true
+
+systemctl daemon-reload 
+
+
+podman push 10.237.7.170:5000/ceph/ceph:v17.2.6
+podman push 10.237.7.170:5000/prometheus/prometheus:v2.33.4
+podman push 10.237.7.170:5000/grafana/loki:2.4.0
+podman push 10.237.7.170:5000/grafana/promtail:2.4.0
+podman push 10.237.7.170:5000/prometheus/node-exporter:v1.3.1
+podman push 10.237.7.170:5000/prometheus/alertmanager:v0.23.0
+podman push 10.237.7.170:5000/ceph/ceph-grafana:8.3.5
+podman push 10.237.7.170:5000/ceph/haproxy:2.3
+podman push 10.237.7.170:5000/ceph/keepalived:2.1.5
+podman push 10.237.7.170:5000/maxwo/snmp-notifier:v1.2.1
+
+
+----------------
+
+####################
+## Install CEPH ####
+####################
+
+
+cd /usr/local/bin 
+curl --silent --remote-name --location https://github.com/ceph/ceph/raw/quincy/src/cephadm/cephadm 
+chmod +x cephadm
+
+/etc/containers/registries.conf
+    unqualified-search-registries = []
+
+    [[registry]]
+    location="10.237.7.170"
+    insecure=true
+
+systemctl daemon-reload 
+
+---------------------------
+################################
+#### Bootstrap ceph cluster  ###
+################################
+
+# In first MON server 
+podman pull 10.237.7.170:5000/ceph/ceph:v17.2.6
+
+cephadm --image 10.237.7.170:5000/ceph/ceph:v17.2.6 bootstrap \
+  --cluster-network 10.237.7.0/24  \
+  --mon-ip 10.237.7.171 \
+  --ssh-user cephadmin \
+  --ssh-private-key /home/cephadmin/.ssh/id_rsa \
+  --ssh-public-key /home/cephadmin/.ssh/authorized_keys  \
+  --initial-dashboard-user admin \
+  --initial-dashboard-password "cephlab01" --skip-pull
+
+
+---> Bootstrap complete
+
+
+apt install ceph-common
+
+ceph orch host label add ceph-mon-171 _admin
+ceph orch host label add ceph-mon-171 mon
+ceph orch host label add ceph-mon-171 mgr
+
+ceph orch host add ceph-mon-172 10.237.7.172 _admin mon mgr
+ceph orch host add ceph-mon-173 10.237.7.173 _admin mon mgr
+
+
+ceph orch apply mon --placement="label:mon"
+ceph orch apply mgr --placement="label:mgr"
+
+
+ceph config set mgr mgr/cephadm/container_image_prometheus      10.237.7.170:5000/prometheus/prometheus:v2.33.4
+ceph config set mgr mgr/cephadm/container_image_grafana         10.237.7.170:5000/ceph/ceph-grafana:8.3.5
+ceph config set mgr mgr/cephadm/container_image_alertmanager    10.237.7.170:5000/prometheus/alertmanager:v0.23.0
+ceph config set mgr mgr/cephadm/container_image_node_exporter   10.237.7.170:5000/prometheus/node-exporter:v1.3.1
+
+
+# check processes
+ceph orch ps 
+
+# if node-exporter failed, just redeploy it 
+ceph orch daemon redeploy node-exporter.ceph-mon-171
+ceph orch daemon redeploy node-exporter.ceph-mon-172
+ceph orch daemon redeploy node-exporter.ceph-mon-173
+
+
+# 
+ceph cephadm check-host ceph-osd-175 10.237.7.175
+ceph cephadm check-host ceph-osd-176 10.237.7.176
+ceph cephadm check-host ceph-osd-177 10.237.7.177
+
+
+# 
+ceph orch host add ceph-osd-175 10.237.7.175 osd _no_schedule
+ceph orch host add ceph-osd-176 10.237.7.176 osd _no_schedule
+ceph orch host add ceph-osd-177 10.237.7.177 osd _no_schedule
+
+# 
+cat << EOF > osd_spec.yaml 
+service_type: osd
+service_id: osd_ssd_16GB
+placement:
+  label: 'osd'
+spec:
+  data_devices:
+    rotational: 0
+    size: '10G:40G'
+EOF
+
+# apply osd spec 
+ceph orch apply -i osd_spec.yaml
+
+# 
+ceph orch host label rm ceph-osd-175 _no_schedule
+ceph orch host label rm ceph-osd-176 _no_schedule
+ceph orch host label rm ceph-osd-177 _no_schedule
+
+# 
+ceph osd crush add-bucket ssd-01 root
+
+ceph osd crush move ceph-osd-175 root=ssd-01
+ceph osd crush move ceph-osd-176 root=ssd-01
+ceph osd crush move ceph-osd-177 root=ssd-01
+
+# cluster config 
+ceph config set global osd_pool_default_pg_autoscale_mode off
+ceph config set global log_to_file true
+ceph config set global mon_cluster_log_to_file true
+ceph config set global log_to_stderr false
+ceph config set global mon_cluster_log_to_stderr false
+ceph config set global log_to_journald false
+ceph config set global mon_cluster_log_to_journald false
+ceph config set mon mon_memory_target 4G
+ceph dashboard feature disable nfs rgw cephfs iscsi
+ceph config set global  mon_osd_down_out_subtree_limit host
+ceph config set mon mon_pg_warn_max_object_skew 0.5
+
+ceph config set mon auth_allow_insecure_global_id_reclaim true
+ceph config set mon mon_warn_on_insecure_global_id_reclaim_allowed false
+ceph config set mon mon_warn_on_insecure_global_id_reclaim false
+ceph config set global mon_warn_on_insecure_global_id_reclaim_allowed false
+
+
+# 
+ceph osd pool get .mgr all
+ceph osd pool set .mgr size 2
+
+
+# 
+ceph osd crush rule create-replicated replicated_ssd ssd-01 host ssd
+ceph osd pool create LAB-SSD-01 512 512 replicated replicated_ssd --size 2
+ceph config set mgr mgr/prometheus/rbd_stats_pools LAB-SSD-01
+ceph osd pool application enable LAB-SSD-01 rbd
+
+
+# check 
+root@ceph-mon-171:~# ceph osd pool get  LAB-SSD-01 all
+size: 2
+min_size: 1
+pg_num: 512
+pgp_num: 512
+crush_rule: replicated_ssd
+hashpspool: true
+nodelete: false
+nopgchange: false
+nosizechange: false
+write_fadvise_dontneed: false
+noscrub: false
+nodeep-scrub: false
+use_gmt_hitset: 1
+fast_read: 0
+pg_autoscale_mode: off
+eio: false
+bulk: false
+
+
+
+# testing 
+rbd create -p LAB-SSD-01 --image testing_image_01 -s 100M
+
+root@ceph-mon-171:~# rbd ls LAB-SSD-01
+testing_image_01
+
+root@ceph-mon-171:~# rbd info LAB-SSD-01/testing_image_01
+rbd image 'testing_image_01':
+	size 100 MiB in 25 objects
+	order 22 (4 MiB objects)
+	snapshot_count: 0
+	id: 3a11218ceab2
+	block_name_prefix: rbd_data.3a11218ceab2
+	format: 2
+	features: layering, exclusive-lock, object-map, fast-diff, deep-flatten
+	op_features:
+	flags:
+	create_timestamp: Tue Jan  9 09:28:41 2024
+	access_timestamp: Tue Jan  9 09:28:41 2024
+	modify_timestamp: Tue Jan  9 09:28:41 2024
+
+root@ceph-mon-171:~# rbd du LAB-SSD-01/testing_image_01
+NAME              PROVISIONED  USED
+testing_image_01      100 MiB   0 B
+
+
+
+rbd map LAB-SSD-01/testing_image_01 --name client.admin -m 10.237.7.171
+-> /dev/rbd0
+
+root@ceph-mon-171:~# mkfs.xfs  /dev/rbd0
+meta-data=/dev/rbd0              isize=512    agcount=4, agsize=6400 blks
+         =                       sectsz=512   attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=0
+         =                       reflink=1    bigtime=0 inobtcount=0
+data     =                       bsize=4096   blocks=25600, imaxpct=25
+         =                       sunit=16     swidth=16 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1
+log      =internal log           bsize=4096   blocks=1872, version=2
+         =                       sectsz=512   sunit=16 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+Discarding blocks...Done.
+
+
+mkdir /mnt/testing_image_01
+mount /dev/rbd0 /mnt/testing_image_01
+
+# benchmark 
+
+apt install python3-pip -y
+apt install fio -y 
+pip3 install fio-plot 
+
+(`pip3 install <module>` if neccesary)
+
+# create file  benchfio.ini 
+  [benchfio]
+  target = /dev/rbd0
+  output = /root/benchfio.output
+  block_size = 4k,1m
+  type = device
+  mode = randread,randwrite
+  size = 10M
+  iodepth = 1,2
+  numjobs = 1,2
+  direct = 1
+  engine = libaio
+  precondition = False
+  precondition_repeat = False
+  #precondition-template = /root/benchmarks/precondition.fio
+  runtime = 300
+  destructive = True
+
+
+
+mkdir /root/benchfio.output
+
+nohup bench-fio benchfio.ini  &
+
+# export benchfio result image 
+fio-plot -i benchfio.output/rbd0/4k/ --source "thienln" -T "4KB-randwrite-iops" -L -t iops -r randwrite
+
+
+# Setup monitoring 
+ceph mgr module enable prometheus
+ceph mgr module enable dashboard
+
+ceph orch ps | grep grafana 
+grafana.ceph-mon-171        ceph-mon-171  *:3000       running (19m)     9m ago   2w    42.6M        -  8.3.5    dad864ee21e9  b4e2b200cacd
+
+# Set admin user password for grafana 
+#https://www.ibm.com/docs/en/storage-ceph/5?topic=access-setting-admin-user-password-grafana
+
+# create file grafana.yml 
+  service_type: grafana
+  spec:
+    initial_admin_password: thienlnpassword
+
+ceph orch apply -i grafana.yml
+ceph orch redeploy grafana
+
+# access https://10.237.7.171:3000
+
